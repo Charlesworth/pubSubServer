@@ -37,10 +37,10 @@ func main() {
 	//************** router set up       ************************
 	router := httprouter.New()
 
-	router.POST("/:topic/:username", subscribe)
-	router.DELETE("/:topic/:username", unsubscribe)
-	router.POST("/:topic", publish)
-	router.GET("/:topic/:username", retrieve)
+	router.POST("/:topic/:username", subscribe(RedisClient))
+	router.DELETE("/:topic/:username", unsubscribe(RedisClient))
+	router.POST("/:topic", publish(RedisClient))
+	router.GET("/:topic/:username", retrieve(RedisClient))
 
 	http.Handle("/", router)
 
@@ -48,134 +48,171 @@ func main() {
 	log.Fatal(http.ListenAndServe(":3000", nil))
 }
 
-func subscribe(w http.ResponseWriter, r *http.Request, params httprouter.Params) {
-	log.Println("request from " + r.RemoteAddr)
-	log.Println("subscribe from " + params.ByName("topic") + "/" + params.ByName("username"))
-	//check if usr already exists
-	usrExists, _ := RedisClient.Cmd("EXISTS", params.ByName("username")).Int() //******double check exists works with a hash
-	if usrExists == 0 {
-		//make the usr profile
-		RedisClient.Cmd("HMSET", params.ByName("username"))
-	}
+func subscribe(RedisClient *redis.Client) func(w http.ResponseWriter, r *http.Request, params httprouter.Params) {
+	return func(w http.ResponseWriter, r *http.Request, params httprouter.Params) {
 
-	//check if channel exsists
-	keyExists, _ := RedisClient.Cmd("EXISTS", params.ByName("topic")).Int()
-	if keyExists == 0 {
-		//no channel for that name
-		log.Println("fail, no such channel exists")
-		//**************************************Need code here for fail****************************
-	} else {
-		//get channel post no
-		postNo, _ := RedisClient.Cmd("GET", params.ByName("topic")).Int()
+		log.Println("request from " + r.RemoteAddr)
+		log.Println("subscribe from " + params.ByName("topic") + "/" + params.ByName("username"))
 
-		//add channel to usr profile with channel post no
-		RedisClient.Cmd("HSETNX", params.ByName("username"), params.ByName("topic"), string(postNo))
+		var postNo int
 
-		//increment usrCount on channel post n
-		RedisClient.Cmd("HINCRBY", params.ByName("topic")+string(postNo), "usrCount", "1") //error possible here, post may not exists yet
-		//may need to increment a channel waiting users int
+		//Get the current PostN, if the channel doesn't exist yet make it.
+		//check if the channel key has been set in redis
+		channelExists, err := RedisClient.Cmd("EXISTS", params.ByName("topic")).Int()
+		errLog(err)
+		fmt.Println("does channel exist: ", channelExists)
+		//if channel !exists
+		if channelExists == 0 {
+			//make channel:0 and post0:usrCount=0
+			RedisClient.Cmd("SET", params.ByName("topic"), "0")
+			RedisClient.Cmd("HMSET", params.ByName("topic")+"0", "usrCount", "0")
+			postNo = 0
+		} else {
+			//else read channel:value int
+			postNo, _ = RedisClient.Cmd("GET", params.ByName("topic")).Int()
+		}
+
+		//add channel to usr profile with channel post no, doesn't over-ride
+		//previos subscriptions to the same channel
+		writen, err := RedisClient.Cmd("HSETNX", params.ByName("username"), params.ByName("topic"), postNo).Int()
+		errLog(err)
+		fmt.Println("was it writen (1) or was user already subscribed to this channel (0): ", writen)
+
+		if writen == 1 {
+			//increment usrCount on channel post n
+			result := RedisClient.Cmd("HINCRBY", params.ByName("topic")+string(postNo), "usrCount", "1")
+			fmt.Println("usrCount incremented by: ", result)
+		}
 
 		//return responce code 200
 		w.WriteHeader(200)
+		fmt.Println("-----------------------------------")
 	}
-
 }
 
-func unsubscribe(w http.ResponseWriter, r *http.Request, params httprouter.Params) {
-	log.Println("request from " + r.RemoteAddr)
-	log.Println("unsubscribe from " + params.ByName("topic") + "/" + params.ByName("username"))
-	//check if channel exists
-	usrExists, _ := RedisClient.Cmd("EXISTS", params.ByName("username")).Int() //******double check exsists works with a hash
-	if usrExists == 0 {
-		//profile doesn't exist, fail
-		//**************************************Need code here for fail****************************
-	}
+//test the HDEL and HINCRBY
+func unsubscribe(RedisClient *redis.Client) func(w http.ResponseWriter, r *http.Request, params httprouter.Params) {
+	return func(w http.ResponseWriter, r *http.Request, params httprouter.Params) {
+		log.Println("request from " + r.RemoteAddr)
+		log.Println("unsubscribe from " + params.ByName("topic") + "/" + params.ByName("username"))
 
-	//check if channel is in usr profile
-	isSubscribed, _ := RedisClient.Cmd("HEXISTS", params.ByName("username"), params.ByName("topic")).Int()
-	if isSubscribed == 0 {
-		//subscription doesn't exsist
-		w.WriteHeader(404)
-	} else {
-		//if it is get the post no
-		postNo, _ := RedisClient.Cmd("HGET", params.ByName("username"), params.ByName("topic")).Str()
-
-		//then remove the channel from usr profile
-		RedisClient.Cmd("HDEL", params.ByName("username"), params.ByName("topic"))
-
-		//decrement usr count on that post
-		RedisClient.Cmd("HINCRBY", params.ByName("topic")+postNo, "usrCount", -1) //this may fail as post may
-		//not exsist yet
-
-		w.WriteHeader(200)
-	}
-
-	//*channelClean* go channelClean
-
-}
-
-func publish(w http.ResponseWriter, r *http.Request, params httprouter.Params) {
-	log.Println("Publish requested from " + r.RemoteAddr + " into Channel " + params.ByName("topic"))
-	defer r.Body.Close()
-	bodyByte, _ := ioutil.ReadAll(r.Body)
-	body := string(bodyByte)
-	log.Println(body)
-
-	var postNo int
-	//if channel !exists
-	keyExists, _ := RedisClient.Cmd("EXISTS", params.ByName("topic")).Int()
-	if keyExists == 0 {
-		//make the channel with value 1 and use postNumber = 0
-		RedisClient.Cmd("SET", params.ByName("topic"), "1")
-		RedisClient.Cmd("HMSET", params.ByName("topic")+string(postNo), "usrCount", "0") //***error here, postNO not set
-		postNo = 0
-	} else {
-		//else read channel postNumber int and increment the value
-		postNo, _ = RedisClient.Cmd("GET", params.ByName("topic")).Int()
-		RedisClient.Cmd("INCR", params.ByName("topic"), "1")
-	}
-
-	//make channeln hash with content=body and UsrNO=0
-	RedisClient.Cmd("HMSET", params.ByName("topic")+string(postNo), "Content", body)
-	//make the next post so that usrcount can be set while waiting for content
-	RedisClient.Cmd("HMSET", params.ByName("topic")+string(postNo+1), "usrCount", "0")
-	//return responce code 200
-	w.WriteHeader(200)
-}
-
-func retrieve(w http.ResponseWriter, r *http.Request, params httprouter.Params) {
-	log.Println("request from " + r.RemoteAddr)
-	log.Println("retrieve from " + params.ByName("topic") + "/" + params.ByName("username"))
-	//check if subscribed
-	isSubscribed, _ := RedisClient.Cmd("HEXISTS", params.ByName("username"), params.ByName("topic")).Int()
-	if isSubscribed == 0 {
-		//subscription doesn't exsist
-		w.WriteHeader(404)
-	} else {
-		//if subscribed then look at channel post no on usr profile
-		postNo, _ := RedisClient.Cmd("HGET", params.ByName("username"), params.ByName("topic")).Int()
-
-		//check if there are any post content to read
-		postExists, _ := RedisClient.Cmd("HEXISTS", params.ByName("username"), params.ByName("Content")).Int()
-		if postExists == 0 {
-			//if not then return 204
-			w.WriteHeader(204)
+		usrExists, _ := RedisClient.Cmd("HEXISTS", params.ByName("username"), params.ByName("topic")).Int()
+		if usrExists == 0 {
+			w.WriteHeader(404)
 		} else {
-			//else if channel post no is not last, retrieve post content
-			content, _ := RedisClient.Cmd("HGET", params.ByName("username"), params.ByName("Content")).Str()
+			postNo, _ := RedisClient.Cmd("HGET", params.ByName("username"), params.ByName("topic")).Int()
 
-			//then move usr count to next post
-			RedisClient.Cmd("HINCRBY", params.ByName("topic")+string(postNo), "usrCount", "-1")
-			RedisClient.Cmd("HINCRBY", params.ByName("topic")+string(postNo+1), "usrCount", "1")
+			//then remove the channel from usr profile
+			RedisClient.Cmd("HDEL", params.ByName("username"), params.ByName("topic"))
 
-			//increment the post number on the user profile
-			RedisClient.Cmd("HINCRBY", params.ByName("username"), params.ByName("topic"), "1")
+			//decrement usr count on that post
+			RedisClient.Cmd("HINCRBY", params.ByName("topic")+string(postNo), "usrCount", -1)
 
-			fmt.Fprintf(w, content)
 			w.WriteHeader(200)
+
+		}
+		fmt.Println("-----------------------------------")
+		//*channelClean* go channelClean
+	}
+}
+
+//may need to lock the channel:value while doing a publish
+func publish(RedisClient *redis.Client) func(w http.ResponseWriter, r *http.Request, params httprouter.Params) {
+	return func(w http.ResponseWriter, r *http.Request, params httprouter.Params) {
+
+		log.Println("Publish requested from " + r.RemoteAddr + " into Channel " + params.ByName("topic"))
+		defer r.Body.Close()
+		bodyByte, _ := ioutil.ReadAll(r.Body)
+		body := string(bodyByte)
+		log.Println("Content: " + body)
+
+		var postNo int
+
+		//Get the current PostN, if the channel doesn't exist yet make it.
+		//check if the channel key has been set in redis
+		channelExists, err := RedisClient.Cmd("EXISTS", params.ByName("topic")).Int()
+		errLog(err)
+		fmt.Println("does channel exist: ", channelExists)
+		//if channel !exists
+		if channelExists == 0 {
+			//make channel:0 and post0:usrCount=0
+			RedisClient.Cmd("SET", params.ByName("topic"), "0")
+			RedisClient.Cmd("HMSET", params.ByName("topic")+"0", "usrCount", "0")
+			postNo = 0
+		} else {
+			//else read channel:value int
+			postNo, _ = RedisClient.Cmd("GET", params.ByName("topic")).Int()
 		}
 
-		//*cleanChannel*
+		//increment the channel:value
+		test := RedisClient.Cmd("INCR", params.ByName("topic"))
+		fmt.Println("current post number: ", postNo)
+		fmt.Println("next post: ", test)
+
+		//add content to the current post
+		result := RedisClient.Cmd("HMSET", params.ByName("topic")+string(postNo), "Content", body)
+		fmt.Println("content added to current post: ", result)
+
+		//make the next post with no content
+		result = RedisClient.Cmd("HMSET", params.ByName("topic")+string(postNo+1), "usrCount", "0")
+		fmt.Println("made a empty next post: ", result)
+
+		//return responce code 200
+		w.WriteHeader(200)
+		fmt.Println("-----------------------------------")
+	}
+}
+
+//retrieve
+func retrieve(RedisClient *redis.Client) func(w http.ResponseWriter, r *http.Request, params httprouter.Params) {
+	return func(w http.ResponseWriter, r *http.Request, params httprouter.Params) {
+
+		log.Println("request from " + r.RemoteAddr)
+		log.Println("retrieve from " + params.ByName("topic") + "/" + params.ByName("username"))
+		//check if subscribed
+		isSubscribed, _ := RedisClient.Cmd("HEXISTS", params.ByName("username"), params.ByName("topic")).Int()
+		if isSubscribed == 0 {
+			//subscription doesn't exsist
+			fmt.Println("404: no subscription")
+			w.WriteHeader(404)
+		} else {
+			//if subscribed then look at channel post no on usr profile
+			//postNo, err := RedisClient.Cmd("HGET", params.ByName("username"), params.ByName("topic")).Str()
+			postNo, err := RedisClient.Cmd("HGET", "charlie", "hello").Int()
+			errLog(err)
+			fmt.Println("usr is on postN: ", postNo)
+
+			//check if there is any post content to read, they may have subscribed and
+			//no one has posted yet
+			postHasContent, err := RedisClient.Cmd("HEXISTS", params.ByName("topic")+string(postNo), "Content").Int()
+			errLog(err)
+			fmt.Println("post number has content: ", postHasContent)
+			if postHasContent == 0 {
+				fmt.Println("204: no posts for you, your up to date")
+				//if not then return 204
+				w.WriteHeader(204)
+			} else {
+				//else if channel post no is not last, retrieve post content
+				content, _ := RedisClient.Cmd("HGET", params.ByName("topic")+string(postNo), "Content").Str()
+				fmt.Println("content retrieved: ", content)
+
+				//then move usr count to next post
+				result := RedisClient.Cmd("HINCRBY", params.ByName("topic")+string(postNo), "usrCount", -1)
+				fmt.Println("minus from current post: ", result)
+				result = RedisClient.Cmd("HINCRBY", params.ByName("topic")+string(postNo+1), "usrCount", 1)
+				fmt.Println("to next post: ", result)
+
+				//increment the post number on the user profile
+				result = RedisClient.Cmd("HINCRBY", params.ByName("username"), params.ByName("topic"), 1)
+				fmt.Println("increment postN on usr profile: ", result)
+
+				fmt.Fprintf(w, content)
+				w.WriteHeader(200)
+			}
+
+			//*cleanChannel*
+		}
+		fmt.Println("-----------------------------------")
 	}
 }
 
