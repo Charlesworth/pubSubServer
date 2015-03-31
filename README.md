@@ -12,9 +12,43 @@ There are 4 main things you can do with this application:
 
 When a user subscribes to a topic, they can retrieve all messages published to that topic from the point of subscription, not any from before that point. When they unsubscribe that place in the topics message que is lost, so re-subscription will start again from the most recent post. Any posts that have been read by all subscribed readers from the point at which it was posted will be deleted.
 
+
 ## API
 
-TODO
+### Subscribe: `POST` /[topic]/[user]
+
+Adds a subscription to [topic] for [user], so the user will be able to read all posts to the topic that are published from that point onwards.
+
+Response codes:
+- 200: Subscription succeeded.
+
+### Unsubscribe: `DELETE` /[topic]/[user]
+
+Deletes a subscription to [topic] for [user], the user will not be able to read any posts from the topic without resubscribing.
+
+Response codes:
+- 200: Unsubscribe succeeded.
+- 404: The subscription does not exist.
+
+### Publish: `POST` /[topic]
+
+Adds the HTTP request body to [topic] as a new post.
+
+Request body: The message being published.
+
+Response codes:
+- 200: Publish succeeded.
+
+### Retrieve: `GET` /[topic]/[user]
+
+Gets the next post from [topic] for the [user], depending on what post they are currently on.
+
+Response codes:
+- 200: Retrieval succeeded.
+- 204: There are no messages available for this topic on this user.
+- 404: The subscription does not exist.
+
+Response body: The body of the next message, if one exists.
 
 ## Memory Structure
 
@@ -31,3 +65,10 @@ As it may not be imediatly apparent in the code, I'll describe the data structur
 - Key => Topic + Post Number, e.g. "Cats6"
   -  Field/Value => User Count (string) / Number (int), e.g. "usrCount" / 5
   -  Field/Value => User Count (string) / Number (int), e.g. "content" / "I love cats: www.cats.com"
+
+### future addition, "given more time"
+
+- shard redis and add read only instances
+- persist posts in sql DB or data store
+- have more robust user system, perhaps oauth so others can't see you subs and read your posts
+- post for subscription holders only, so no sub topics don't get messages auto deleted
