@@ -112,7 +112,8 @@ func unsubscribe(RedisClient *redis.Client) func(w http.ResponseWriter, r *http.
 
 		}
 		fmt.Println("-----------------------------------")
-		//*channelClean* go channelClean
+		//*unsubChannelClean* go unsubChannelClean
+
 	}
 }
 
@@ -210,7 +211,7 @@ func retrieve(RedisClient *redis.Client) func(w http.ResponseWriter, r *http.Req
 				w.WriteHeader(200)
 			}
 
-			//*cleanChannel*
+			//*channelClean* go channelClean
 		}
 		fmt.Println("-----------------------------------")
 	}
@@ -219,8 +220,36 @@ func retrieve(RedisClient *redis.Client) func(w http.ResponseWriter, r *http.Req
 //clean the channel of any posts that have been read by everyone, kicked off after a usrCount decrement
 //should run differently depending on retrieve and unsub: unsub will scan whole load until a usrCount is found,
 //while retrieve will scan up to channelPost(N + 1)
+func postClean(channel string, postNo int) bool {
+	//if post[postNo].usrcount = 0 then
+	usrCount, _ := RedisClient.Cmd("HGET", channel+string(postNo), "usrCount").Int()
+	if usrCount == 0 {
+		//	if post[postNo - 1] !exists
+		postHasContent, _ := RedisClient.Cmd("HEXISTS", channel+string(postNo-1), "Content").Int()
+		if postHasContent == 0 {
+			//delete the post and return true
+			RedisClient.Cmd("HDEL", channel+string(postNo), "Content", "usrCount")
+			return true
+		}
+	}
+	//else return false
+	return false
+}
+
 func channelClean(channel string, postNo int) {
-	//after a usr count decrement, clean the channel of any posts that have been read by everyone
+	deleted := postClean(channel, postNo)
+	if deleted {
+		for i := postNo + 1; ; i++ {
+			//get the usrcount
+			usrCount, _ := RedisClient.Cmd("HGET", channel+string(i), "usrCount").Int()
+			if usrCount == 0 {
+				//	delete and reloop
+				RedisClient.Cmd("HDEL", channel+string(i), "Content", "usrCount")
+			} else {
+				return
+			}
+		}
+	}
 }
 
 func errFatal(err error) {
